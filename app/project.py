@@ -86,6 +86,7 @@ def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
 class ProjectManager:
     def __init__(self, root_dir):
         self.root_dir = root_dir
+        self.chunks = []
         self.script_path = os.path.join(root_dir, "annotated_script.json")
         self.chunks_path = os.path.join(root_dir, "chunks.json")
         self.voicelines_dir = os.path.join(root_dir, "voicelines")
@@ -696,31 +697,112 @@ class ProjectManager:
 
     def generate_chunks_parallel(self, indices, max_workers=2, progress_callback=None,
                                   cancel_check=None):
-        """Generate multiple chunks in parallel using ThreadPoolExecutor.
-
-        Uses individual TTS API calls with per-speaker voice settings.
-
-        Args:
-            indices: List of chunk indices to generate
-            max_workers: Number of concurrent TTS workers
-            progress_callback: Optional callback(completed, failed, total) for progress updates
-            cancel_check: Optional callable returning True when cancellation is requested
-
-        Returns:
-            dict with 'completed', 'failed', and 'cancelled' keys
-        """
+        """Generate multiple chunks. External LoRA: single batch call. Others: parallel."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         results = {"completed": [], "failed": [], "cancelled": 0}
-
-        # Filter out empty-text chunks
         chunks = self.load_chunks()
         if chunks:
             indices = [i for i in indices if 0 <= i < len(chunks) and chunks[i].get("text", "").strip()]
-
         total = len(indices)
-
         if total == 0:
+            return results
+
+        # Lit le mode TTS depuis config.json
+        tts_mode = 'external'
+        try:
+            if os.path.exists(self.config_path):
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    _cfg = json.load(f)
+                    tts_mode = _cfg.get("tts", {}).get("mode", "external")
+        except Exception:
+            pass
+
+        voice_config = {}
+        if os.path.exists(self.voice_config_path):
+            with open(self.voice_config_path, "r", encoding="utf-8") as f:
+                voice_config = json.load(f)
+        lora_types = ('lora', 'builtin_lora')
+
+        # Initialise l'engine si pas encore fait
+        if self.engine is None:
+            self.get_engine()
+
+        # Sépare les chunks LoRA et non-LoRA
+        # Les personnages inconnus (custom/Aiden = défaut Alexandria) sont reclassés en LoRA narrator_fr_v2
+        DEFAULT_ADAPTERS = {"male": "narrator_fr_v2_1774774816", "female": "feminine_fr_1774743389"}
+        for i in indices:
+            if 0 <= i < len(chunks):
+                spk = chunks[i].get('speaker','')
+                vc_entry = voice_config.get(spk, {})
+                if vc_entry.get('type') == 'custom' and vc_entry.get('voice') in ('Aiden', 'Ryan', ''):
+                    # Personnage par défaut — on le reclasse en LoRA narrator_fr_v2
+                    voice_config[spk] = {
+                        "type": "lora", "voice": "narrator_fr_v2",
+                        "adapter_id": DEFAULT_ADAPTERS["male"],
+                        "adapter_path": f"lora_models/{DEFAULT_ADAPTERS['male']}",
+                        "character_style": "", "default_style": "", "seed": "-1",
+                        "ref_audio": None, "ref_text": None, "description": ""
+                    }
+        lora_indices = [i for i in indices if voice_config.get(chunks[i].get('speaker',''), {}).get('type') in lora_types]
+        other_indices = [i for i in indices if i not in lora_indices]
+        has_lora = len(lora_indices) > 0
+
+        if tts_mode == 'external' and has_lora and hasattr(self.engine, '_external_batch_lora'):
+            print(f"Starting BATCH generation of {len(lora_indices)} LoRA chunks + {len(other_indices)} autres (external mode)...")
+            lora_chunks = [
+                {"index": i, "text": chunks[i].get("text",""),
+                 "instruct": chunks[i].get("instruct",""),
+                 "speaker": chunks[i].get("speaker","")}
+                for i in lora_indices if 0 <= i < len(chunks)
+            ]
+            batch_res = self.engine._external_batch_lora(lora_chunks, voice_config, self.voicelines_dir)
+            for idx in batch_res["completed"]:
+                src = os.path.join(self.voicelines_dir, f"temp_batch_{idx}.wav")
+                speaker_name = chunks[idx].get('speaker','unknown').lower()
+                dst = os.path.join(self.voicelines_dir, f"voiceline_{idx+1:04d}_{speaker_name}.wav")
+                if os.path.exists(src):
+                    import shutil as _sh
+                    _sh.move(src, dst)
+                final = dst if os.path.exists(dst) else src
+                sep = os.sep
+                rel = os.path.relpath(final, self.root_dir)
+                rel = rel.replace(sep, "/")
+                chunks[idx]["audio_path"] = rel
+                chunks[idx]["status"] = "done"
+            for idx, err in batch_res["failed"]:
+                chunks[idx]["status"] = "error"
+
+            # Vérifie les chunks manquants — certains peuvent être absents du batch
+            all_indices = set(indices)
+            completed_set = set(batch_res["completed"])
+            failed_set = set(i for i, _ in batch_res["failed"])
+            missing = all_indices - completed_set - failed_set
+            if missing:
+                print(f"[batch] {len(missing)} chunks non traités, ajout aux failed: {sorted(missing)}")
+                for idx in missing:
+                    batch_res["failed"].append((idx, "Non traité par le batch"))
+                    chunks[idx]["status"] = "error"
+
+            self.save_chunks(chunks)
+            results["completed"] = batch_res["completed"]
+            results["failed"] = batch_res["failed"]
+
+            # Traite les chunks non-LoRA séquentiellement
+            if other_indices:
+                print(f"Traitement séquentiel de {len(other_indices)} chunks non-LoRA...")
+                for idx in other_indices:
+                    try:
+                        success, msg = self.generate_chunk_audio(idx)
+                        if success:
+                            results["completed"].append(idx)
+                        else:
+                            results["failed"].append((idx, msg))
+                    except Exception as e:
+                        results["failed"].append((idx, str(e)))
+
+            if progress_callback:
+                progress_callback(len(results["completed"]), len(results["failed"]), total)
             return results
 
         print(f"Starting parallel generation of {total} chunks with {max_workers} workers...")

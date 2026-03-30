@@ -67,12 +67,13 @@
             </button>
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav me-auto">
-                    <li class="nav-item"><a class="nav-link nav-pipeline active" data-tab="setup">1. Setup</a></li>
+                    <li class="nav-item"><a class="nav-link nav-advanced active" data-tab="batch">🎙 Batch</a></li>
+                    <li class="nav-item ms-3 border-start border-secondary ps-3"><a class="nav-link nav-pipeline" data-tab="setup">1. Setup</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="script">2. Script</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="voices">3. Voices</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="editor">4. Editor</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="audio">5. Result</a></li>
-                    <li class="nav-item ms-3 border-start border-secondary ps-3"><a class="nav-link nav-advanced" data-tab="designer">Designer</a></li>
+                    <li class="nav-item"><a class="nav-link nav-advanced" data-tab="designer">Designer</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="dataset-builder">Dataset</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="training">Training</a></li>
                 </ul>
@@ -82,8 +83,405 @@
 
     <div class="container-wide">
 
+
+        <!-- Batch Pipeline Tab -->
+        <div id="batch-tab" class="tab-content">
+            <h5 class="mb-3">🎙 Batch Audiobook Pipeline</h5>
+            <div class="row g-3 mb-3">
+                <div class="col-md-5">
+                    <label class="form-label fw-bold">Dossier source (.txt)</label>
+                    <div class="input-group">
+                        <input type="text" id="batch-input-dir" class="form-control" placeholder="C:/chemin/vers/chapitres">
+                        <button class="btn btn-outline-secondary" onclick="batchPickFolderElectron('input')" title="Sélectionner le dossier source">📂</button>
+                        <input type="file" id="batch-input-picker" webkitdirectory style="display:none" onchange="batchPickFolder('input', this)">
+                    </div>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label fw-bold">Dossier output</label>
+                    <div class="input-group">
+                        <input type="text" id="batch-output-dir" class="form-control" placeholder="C:/chemin/vers/output">
+                        <button class="btn btn-outline-secondary" onclick="batchPickFolderElectron('output')" title="Sélectionner le dossier output">📂</button>
+                        <input type="file" id="batch-output-picker" webkitdirectory style="display:none" onchange="batchPickFolder('output', this)">
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold">Format</label>
+                    <select id="batch-format" class="form-select">
+                        <option value="mp3">MP3</option>
+                        <option value="audacity">ZIP Audacity</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row g-3 mb-3">
+                <div class="col-md-3">
+                    <label class="form-label">Chapitre début</label>
+                    <input type="number" id="batch-start" class="form-control" value="1" min="1">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Chapitre fin</label>
+                    <input type="number" id="batch-end" class="form-control" value="9999" min="1">
+                </div>
+                <div class="col-md-6 d-flex align-items-end gap-2">
+                    <button class="btn btn-success" id="batch-start-btn" onclick="batchStart()">▶ Démarrer</button>
+                    <button class="btn btn-warning" id="batch-pause-btn" onclick="batchPause()" disabled>⏸ Pause</button>
+                    <button class="btn btn-danger" id="batch-cancel-btn" onclick="batchCancel()" disabled>⏹ Annuler</button>
+                    <button class="btn btn-info" id="batch-recheck-btn" onclick="batchRecheck()">🔄 Recheck</button>
+                    <button class="btn btn-secondary" onclick="batchLoad()">📂 Charger</button>
+                </div>
+            </div>
+
+            <!-- Barre de progression globale -->
+            <div class="mb-3">
+                <div class="d-flex justify-content-between mb-1">
+                    <span id="batch-progress-label">En attente...</span>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <div style="min-width:140px;font-size:12px;color:#666;text-align:left;">
+                        <div id="batch-time-start"></div>
+                        <div id="batch-time-eta" style="color:#0d6efd;"></div>
+                    </div>
+                    <div class="progress flex-grow-1" style="height:24px;">
+                        <div id="batch-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%">0%</div>
+                    </div>
+                    <div style="min-width:120px;font-size:12px;color:#666;text-align:right;">
+                        <div id="batch-time-end"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chapitre en cours -->
+            <div class="alert alert-info py-2 mb-3" id="batch-current" style="display:none;">
+                ⏳ En cours : <strong id="batch-current-name"></strong>
+            </div>
+
+            <!-- Liste des chapitres -->
+            <div class="table-responsive" style="max-height:400px;overflow-y:auto;">
+                <table class="table table-sm table-hover">
+                    <thead class="table-dark sticky-top">
+                        <tr>
+                            <th style="width:60%">Chapitre</th>
+                            <th style="width:20%">Statut</th>
+                            <th style="width:20%">Info</th>
+                        </tr>
+                    </thead>
+                    <tbody id="batch-chapter-list"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+        let batchPollInterval = null;
+
+        function batchPickFolder(type, input) {
+            if (input.files.length === 0) return;
+            const file = input.files[0];
+            // Electron expose file.path avec le chemin complet
+            let path = '';
+            if (file.path) {
+                // Chemin complet Electron — retire le nom du fichier
+                path = file.path.replace(/[\/][^\/]+$/, '');
+            } else {
+                // Fallback navigateur — demande à l'utilisateur de saisir manuellement
+                const relPath = file.webkitRelativePath || file.name;
+                path = relPath.split('/')[0];
+                alert('Chemin partiel récupéré: ' + path + '\nSi incorrect, tape le chemin complet manuellement.');
+            }
+            if (type === 'input') {
+                document.getElementById('batch-input-dir').value = path;
+            } else {
+                document.getElementById('batch-output-dir').value = path;
+            }
+            input.value = '';
+        }
+
+        async function batchPickFolderElectron(type) {
+            // Utilise l endpoint Python tkinter pour ouvrir une boite de dialogue native
+            try {
+                const resp = await fetch('/api/browse_folder');
+                const data = await resp.json();
+                if (data.path) {
+                    if (type === 'input') {
+                        document.getElementById('batch-input-dir').value = data.path;
+                    } else {
+                        document.getElementById('batch-output-dir').value = data.path;
+                    }
+                    return;
+                }
+            } catch(e) {
+                console.error('browse_folder error:', e);
+            }
+            // Fallback: input file picker
+            const pickerId = type === 'input' ? 'batch-input-picker' : 'batch-output-picker';
+            document.getElementById(pickerId).click();
+        }
+
+        function batchLoad() {
+            const inputDir = document.getElementById('batch-input-dir').value;
+            const outputDir = document.getElementById('batch-output-dir').value;
+            const format = document.getElementById('batch-format').value;
+            const start = parseInt(document.getElementById('batch-start').value) || 1;
+            const end = parseInt(document.getElementById('batch-end').value) || 9999;
+            if (!inputDir || !outputDir) { alert('Remplis les dossiers source et output'); return; }
+            fetch('/api/batch_pipeline/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({input_dir: inputDir, output_dir: outputDir, export_format: format, chapter_start: start, chapter_end: end})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { alert('Erreur: ' + data.error); return; }
+                alert(data.total + ' chapitres chargés. Clique Démarrer pour lancer.');
+                batchRefreshStatus();
+            })
+            .catch(e => alert('Erreur: ' + e));
+        }
+
+        function batchStart() {
+            const inputDir = document.getElementById('batch-input-dir').value.trim();
+            const outputDir = document.getElementById('batch-output-dir').value.trim();
+            const format = document.getElementById('batch-format').value;
+            const start = parseInt(document.getElementById('batch-start').value) || 1;
+            const end = parseInt(document.getElementById('batch-end').value) || 9999;
+            if (!inputDir || !outputDir) { alert('Remplis les dossiers source et output'); return; }
+            
+            // Normalise les backslashes Windows en forward slashes
+            const inputDirNorm = inputDir.replace(/\\/g, '/');
+            const outputDirNorm = outputDir.replace(/\\/g, '/');
+            
+            fetch('/api/batch_pipeline/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    input_dir: inputDirNorm,
+                    output_dir: outputDirNorm,
+                    export_format: format,
+                    chapter_start: start,
+                    chapter_end: end
+                })
+            })
+            .then(r => {
+                if (!r.ok) return r.json().then(e => { throw new Error(e.detail || JSON.stringify(e)); });
+                return r.json();
+            })
+            .then(data => {
+                if (data.total === 0) { alert('Aucun chapitre trouvé dans ce dossier'); return; }
+                batchSaveDirs();
+                document.getElementById('batch-start-btn').disabled = true;
+                document.getElementById('batch-pause-btn').disabled = false;
+                document.getElementById('batch-cancel-btn').disabled = false;
+                // Reset affichage temps
+                const startEl = document.getElementById('batch-time-start');
+                startEl.textContent = '';
+                startEl.dataset.set = '';
+                document.getElementById('batch-time-eta').textContent = '';
+                document.getElementById('batch-time-end').textContent = '';
+                batchStartPolling();
+                batchRefreshStatus();
+            })
+            .catch(e => alert('Erreur: ' + e.message));
+        }
+
+        function batchPause() {
+            fetch('/api/batch_pipeline/pause', {method: 'POST'})
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('batch-pause-btn').textContent = data.paused ? '▶ Reprendre' : '⏸ Pause';
+            });
+        }
+
+        function batchCancel() {
+            if (!confirm('Annuler le batch en cours ?')) return;
+            fetch('/api/batch_pipeline/cancel', {method: 'POST'})
+            .then(() => {
+                document.getElementById('batch-start-btn').disabled = false;
+                document.getElementById('batch-pause-btn').disabled = true;
+                document.getElementById('batch-cancel-btn').disabled = true;
+            });
+        }
+
+        function batchRecheck() {
+            fetch('/api/batch_pipeline/recheck', {method: 'POST'})
+            .then(r => r.json())
+            .then(data => {
+                alert(data.reset + ' chapitres remis en pending');
+                batchRefreshStatus();
+            });
+        }
+
+        function batchStartPolling() {
+            if (batchPollInterval) clearInterval(batchPollInterval);
+            batchPollInterval = setInterval(batchRefreshStatus, 3000);
+        }
+
+        function batchRefreshStatus() {
+            fetch('/api/batch_pipeline/status')
+            .then(r => r.json())
+            .then(data => {
+                const total = data.total || 0;
+                const current = data.current || 0;
+                const pct = total > 0 ? Math.round(current / total * 100) : 0;
+
+                // Progress bar
+                const bar = document.getElementById('batch-progress-bar');
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+                if (!data.running) bar.classList.remove('progress-bar-animated');
+                else bar.classList.add('progress-bar-animated');
+
+                document.getElementById('batch-progress-label').textContent =
+                    `${current} / ${total} chapitres (${pct}%)`;
+
+                // Heure début, ETA, heure fin estimée
+                const now = new Date();
+                const startEl = document.getElementById('batch-time-start');
+                const etaEl = document.getElementById('batch-time-eta');
+                const endEl = document.getElementById('batch-time-end');
+
+                if (data.running && data.start_time && !startEl.dataset.set) {
+                    const startDate = new Date(data.start_time * 1000);
+                    startEl.textContent = '🕐 Début: ' + startDate.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+                    startEl.dataset.set = '1';
+                }
+
+                if (data.eta_seconds) {
+                    const h = Math.floor(data.eta_seconds / 3600);
+                    const m = Math.floor((data.eta_seconds % 3600) / 60);
+                    etaEl.textContent = `⏱ ~${h > 0 ? h + 'h ' : ''}${m}min restantes`;
+                    // Heure de fin estimée
+                    const endDate = new Date(now.getTime() + data.eta_seconds * 1000);
+                    endEl.textContent = '🏁 Fin: ' + endDate.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+                } else if (!data.running && current > 0) {
+                    etaEl.textContent = '';
+                    endEl.textContent = '✅ Terminé: ' + now.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+                } else {
+                    etaEl.textContent = '';
+                    endEl.textContent = '';
+                }
+
+                // Chapitre en cours
+                const cur = document.getElementById('batch-current');
+                if (data.current_chapter) {
+                    cur.style.display = '';
+                    document.getElementById('batch-current-name').textContent = data.current_chapter;
+                } else {
+                    cur.style.display = 'none';
+                }
+
+                // Boutons
+                if (!data.running) {
+                    document.getElementById('batch-start-btn').disabled = false;
+                    document.getElementById('batch-pause-btn').disabled = true;
+                    document.getElementById('batch-cancel-btn').disabled = true;
+                    if (batchPollInterval) { clearInterval(batchPollInterval); batchPollInterval = null; }
+                }
+
+                // Liste chapitres
+                const tbody = document.getElementById('batch-chapter-list');
+                if (data.chapters && data.chapters.length > 0) {
+                    tbody.innerHTML = data.chapters.map(ch => {
+                        let badge = '';
+                        if (ch.status === 'done') badge = '<span class="badge bg-success">✅ done</span>';
+                        else if (ch.status === 'failed') badge = '<span class="badge bg-danger">❌ failed</span>';
+                        else if (ch.status === 'running') badge = '<span class="badge bg-warning text-dark">⏳ running</span>';
+                        else badge = '<span class="badge bg-secondary">⏸ pending</span>';
+
+                        // Mini barre de progression par étape
+                        const steps = ch.steps || {llm:'pending', tts:'pending', verif:'pending', export:'pending'};
+                        const ttsProgress = ch.tts_progress || 0;
+                        const stepDefs = [
+                            {key:'llm',   label:'LLM',    color:'#0d6efd'},
+                            {key:'verif', label:'Vérif',  color:'#6610f2'},
+                            {key:'tts',   label:'TTS',    color:'#198754'},
+                            {key:'export',label:'Export', color:'#fd7e14'},
+                        ];
+                        const stepsHtml = stepDefs.map(s => {
+                            const st = steps[s.key] || 'pending';
+                            let bg = '#dee2e6';
+                            let opacity = '1';
+                            let innerBar = '';
+                            if (st === 'done') bg = s.color;
+                            else if (st === 'running') {
+                                bg = '#dee2e6';
+                                // Pour TTS, affiche une barre de progression interne
+                                if (s.key === 'tts' && ttsProgress > 0) {
+                                    innerBar = `<div style="width:${ttsProgress}%;height:100%;background:${s.color};border-radius:2px;transition:width 0.5s;"></div>`;
+                                } else {
+                                    bg = s.color;
+                                    opacity = '0.4';
+                                }
+                            }
+                            const inner = innerBar 
+                                ? `<div style="flex:1;height:8px;background:#dee2e6;border-radius:2px;margin:0 1px;overflow:hidden;" title="${s.label}: ${st} ${s.key==='tts'&&ttsProgress>0?ttsProgress+'%':''}">${innerBar}</div>`
+                                : `<div style="flex:1;height:8px;background:${bg};opacity:${opacity};border-radius:2px;margin:0 1px;" title="${s.label}: ${st}"></div>`;
+                            return inner;
+                        }).join('');
+
+                        // Légende
+                        const legendHtml = stepDefs.map(s => {
+                            const st = steps[s.key] || 'pending';
+                            const color = st === 'pending' ? '#aaa' : s.color;
+                            const pct = s.key === 'tts' && st === 'running' && ttsProgress > 0 ? ` ${ttsProgress}%` : '';
+                            return `<span style="color:${color};font-size:10px;margin-right:6px;">■ ${s.label}${pct}</span>`;
+                        }).join('');
+
+                        const stepsBar = ch.status !== 'pending'
+                            ? `<div style="display:flex;gap:0;margin-top:4px;">${stepsHtml}</div>
+                               <div style="margin-top:2px;">${legendHtml}</div>`
+                            : '';
+
+                        return `<tr class="${ch.status === 'running' ? 'table-warning' : ch.status === 'failed' ? 'table-danger' : ''}">
+                            <td>${ch.name}${stepsBar}</td>
+                            <td>${badge}</td>
+                            <td><small class="text-muted">${ch.error || ''}</small></td>
+                        </tr>`;
+                    }).join('');
+                }
+            })
+            .catch(e => console.error('Batch status error:', e));
+        }
+
+        // Charge les derniers dossiers utilisés
+        async function batchLoadSavedDirs() {
+            try {
+                const resp = await fetch('/api/batch_pipeline/dirs');
+                const data = await resp.json();
+                if (data.input_dir) document.getElementById('batch-input-dir').value = data.input_dir;
+                if (data.output_dir) document.getElementById('batch-output-dir').value = data.output_dir;
+                if (data.export_format) document.getElementById('batch-format').value = data.export_format;
+            } catch(e) {}
+        }
+
+        // Sauvegarde les dossiers quand on clique Démarrer
+        async function batchSaveDirs() {
+            try {
+                await fetch('/api/batch_pipeline/save_dirs', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        input_dir: document.getElementById('batch-input-dir').value,
+                        output_dir: document.getElementById('batch-output-dir').value,
+                        export_format: document.getElementById('batch-format').value
+                    })
+                });
+            } catch(e) {}
+        }
+
+        // Auto-refresh si on arrive sur l'onglet batch
+        document.addEventListener('DOMContentLoaded', () => {
+            batchLoadSavedDirs();
+            batchRefreshStatus();
+            const batchLink = document.querySelector('[data-tab="batch"]');
+            if (batchLink) {
+                batchLink.addEventListener('click', () => {
+                    batchLoadSavedDirs();
+                    batchRefreshStatus();
+                });
+            }
+        });
+        </script>
+
         <!-- Setup Tab -->
-        <div id="setup-tab" class="tab-content">
+        <div id="setup-tab" class="tab-content" style="display:none;">
             <div class="card">
                 <div class="card-header">
                     <h4><span class="step-indicator step-active">1</span>Configuration</h4>

@@ -564,14 +564,41 @@ class TTSEngine:
         """Generate audio using the appropriate method based on voice type config."""
         voice_data = voice_config.get(speaker)
         if not voice_data:
-            print(f"Warning: No voice configuration for '{speaker}'. Skipping.")
-            return False
+            gender = "male"
+            try:
+                cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+                if os.path.exists(cfg_path):
+                    import json as _json, urllib.request as _ur
+                    with open(cfg_path, "r", encoding="utf-8") as _f:
+                        _cfg = _json.load(_f)
+                    api_key = _cfg.get("llm", {}).get("api_key", "")
+                    base_url = _cfg.get("llm", {}).get("base_url", "")
+                    if api_key and "anthropic" in (base_url or ""):
+                        payload = _json.dumps({"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
+                            "messages": [{"role": "user", "content": f"Character name: {speaker}. Male or female? Reply ONLY 'male' or 'female'."}]
+                        }).encode()
+                        req2 = _ur.Request("https://api.anthropic.com/v1/messages", data=payload,
+                            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+                        with _ur.urlopen(req2, timeout=5) as resp:
+                            gender = "female" if "female" in _json.loads(resp.read())["content"][0]["text"].lower() else "male"
+            except Exception as _e:
+                print(f"Gender detection failed for {speaker}: {_e}")
+            is_f = gender == "female"
+            adapter = "feminine_fr_1774743389" if is_f else "narrator_fr_v2_1774774816"
+            print(f"Auto-assigned {'feminine_fr' if is_f else 'narrator_fr_v2'} to unknown: {speaker}")
+            voice_data = {"type": "lora", "voice": "feminine_fr" if is_f else "narrator_fr_v2",
+                "adapter_id": adapter, "adapter_path": f"lora_models/{adapter}",
+                "character_style": "", "default_style": "", "seed": "-1",
+                "ref_audio": None, "ref_text": None, "description": ""}
+            voice_config[speaker] = voice_data
 
         voice_type = voice_data.get("type", "custom")
 
         if voice_type == "clone":
             return self.generate_clone_voice(text, speaker, voice_config, output_path)
         elif voice_type in ("lora", "builtin_lora"):
+            if self._mode == "external":
+                return self._external_generate_lora(text, instruct_text, voice_data, output_path)
             return self.generate_lora_voice(text, instruct_text, voice_data, output_path)
         elif voice_type == "design":
             return self.generate_design_voice(text, instruct_text, voice_data, output_path)
@@ -661,6 +688,62 @@ class TTSEngine:
         return True
 
     # ── LoRA voice generation ────────────────────────────────────
+
+    def _external_generate_lora(self, text, instruct_text, voice_data, output_path):
+        """Generate LoRA voice via external server using voice clone endpoint."""
+        try:
+            import os, json, shutil
+            from gradio_client import handle_file
+
+            adapter_path = voice_data.get("adapter_path")
+            if not adapter_path:
+                print("Error: No adapter_path in voice_data")
+                return False
+
+            if not os.path.isabs(adapter_path):
+                root_dir = os.path.dirname(os.path.dirname(__file__))
+                adapter_path = os.path.join(root_dir, adapter_path)
+
+            ref_wav_path = os.path.join(adapter_path, "ref_sample.wav")
+            meta_path = os.path.join(adapter_path, "training_meta.json")
+
+            if not os.path.exists(ref_wav_path) or not os.path.exists(meta_path):
+                print(f"Error: ref_sample.wav or training_meta.json not found in {adapter_path}")
+                return False
+
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            ref_text = meta.get("ref_sample_text", "")
+
+            character_style = voice_data.get("character_style", "") or voice_data.get("default_style", "")
+            instruct = instruct_text or ""
+            if character_style:
+                instruct = f"{instruct} {character_style}".strip()
+
+            print(f"TTS [external lora] adapter={os.path.basename(adapter_path)} | text={text[:50]}...")
+
+            client = self._init_external()
+            result = client.predict(
+                ref_audio=handle_file(ref_wav_path),
+                ref_text=ref_text,
+                text=text,
+                language="French",
+                api_name="/generate_voice_clone"
+            )
+
+            generated_audio_filepath = result[0]
+            if not generated_audio_filepath or not os.path.exists(generated_audio_filepath):
+                print(f"Error: No audio generated for: '{text[:50]}...'")
+                return False
+
+            shutil.copy2(generated_audio_filepath, output_path)
+            return True
+
+        except Exception as e:
+            import traceback
+            print(f"Error generating external LoRA voice: {e}")
+            traceback.print_exc()
+            return False
 
     def generate_lora_voice(self, text, instruct_text, voice_data, output_path):
         """Generate audio using a LoRA-finetuned Base model.
@@ -779,6 +862,87 @@ class TTSEngine:
 
     # ── Batch generation ─────────────────────────────────────────
 
+    def _external_batch_lora(self, lora_chunks, voice_config, output_dir):
+        """Génère les chunks LoRA en mode External en groupant par adaptateur."""
+        import json, shutil
+        from collections import defaultdict
+        results = {"completed": [], "failed": []}
+
+        groups = defaultdict(list)
+        for chunk in lora_chunks:
+            speaker = chunk.get("speaker", "")
+            voice_data = voice_config.get(speaker, {})
+            adapter_path = voice_data.get("adapter_path", "")
+            groups[adapter_path].append(chunk)
+
+        client = self._init_external()
+
+        for adapter_path, chunks_group in groups.items():
+            abs_adapter = adapter_path if os.path.isabs(adapter_path) else os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), adapter_path)
+            ref_wav = os.path.join(abs_adapter, "ref_sample.wav")
+            meta_path = os.path.join(abs_adapter, "training_meta.json")
+
+            if not os.path.exists(ref_wav):
+                for chunk in chunks_group:
+                    results["failed"].append((chunk["index"], f"ref_sample.wav not found"))
+                continue
+
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    ref_text = json.load(f).get("ref_sample_text", "")
+            except Exception:
+                ref_text = ""
+
+            texts = [chunk["text"] for chunk in chunks_group]
+            texts_json = json.dumps(texts)
+            print(f"TTS [external batch lora] {len(texts)} textes | {os.path.basename(adapter_path)}")
+
+            try:
+                import re as _re, base64 as _b64, tempfile as _tmp
+                lora_basename = os.path.basename(adapter_path)
+                lora_name = _re.sub(r'_[0-9]{10,}$', '', lora_basename)
+                print(f"[external batch lora] lora_name={lora_name}")
+
+                # Découpe en sous-batches de 8 pour éviter OOM
+                SUB_BATCH = 6
+                sub_groups = [chunks_group[i:i+SUB_BATCH] for i in range(0, len(chunks_group), SUB_BATCH)]
+                print(f"[external batch lora] {len(chunks_group)} chunks -> {len(sub_groups)} sous-batches de {SUB_BATCH}")
+
+                for sub_group in sub_groups:
+                    sub_texts = json.dumps([c["text"] for c in sub_group])
+                    result = client.predict(
+                        texts_json=sub_texts,
+                        lora_name=lora_name,
+                        language=self._language or "French",
+                        api_name="/generate_batch_clone"
+                    )
+                    result_path = result[0] if isinstance(result, tuple) else result
+                    if not result_path or not os.path.exists(result_path):
+                        raise Exception(f"Batch result invalide: {result_path}, erreur: {result[1] if isinstance(result, tuple) else None}")
+                    with open(result_path, "r") as f:
+                        server_wav_b64s = json.load(f)
+                    print(f"[batch] sous-batch: {len(sub_group)} textes -> {len(server_wav_b64s)} WAVs retournés")
+                    for chunk, server_b64 in zip(sub_group, server_wav_b64s):
+                        idx = chunk["index"]
+                        out = os.path.join(output_dir, f"temp_batch_{idx}.wav")
+                        wav_bytes = _b64.b64decode(server_b64)
+                        local_wav = _tmp.NamedTemporaryFile(suffix=".wav", delete=False).name
+                        with open(local_wav, 'wb') as wf:
+                            wf.write(wav_bytes)
+                        if os.path.getsize(local_wav) > 100:  # seuil bas — meme les courtes repliques sont valides
+                            shutil.copy2(local_wav, out)
+                            results["completed"].append(idx)
+                        else:
+                            results["failed"].append((idx, "WAV trop petit"))
+            except Exception as e:
+                print(f"[external batch lora] ERREUR batch: {e}")
+                import traceback; traceback.print_exc()
+                # Marque tous les chunks du groupe comme failed — pas de fallback local
+                for chunk in chunks_group:
+                    results["failed"].append((chunk["index"], f"Batch error: {e}"))
+        return results
+
     def generate_batch(self, chunks, voice_config, output_dir, batch_seed=-1):
         """Generate multiple audio files.
 
@@ -862,25 +1026,7 @@ class TTSEngine:
             if self._mode == "local":
                 batch_results = self._local_batch_lora(lora_chunks, voice_config, output_dir)
             else:
-                batch_results = {"completed": [], "failed": []}
-                for chunk in lora_chunks:
-                    idx = chunk["index"]
-                    output_path = os.path.join(output_dir, f"temp_batch_{idx}.wav")
-                    speaker = chunk.get("speaker")
-                    voice_data = voice_config.get(speaker, {})
-                    try:
-                        success = self.generate_lora_voice(
-                            text=chunk["text"],
-                            instruct_text=chunk.get("instruct", ""),
-                            voice_data=voice_data,
-                            output_path=output_path,
-                        )
-                        if success:
-                            batch_results["completed"].append(idx)
-                        else:
-                            batch_results["failed"].append((idx, "LoRA voice generation failed"))
-                    except Exception as e:
-                        batch_results["failed"].append((idx, str(e)))
+                batch_results = self._external_batch_lora(lora_chunks, voice_config, output_dir)
             results["completed"].extend(batch_results["completed"])
             results["failed"].extend(batch_results["failed"])
             self._clear_gpu_cache()
@@ -1446,42 +1592,40 @@ class TTSEngine:
             if not voice_data:
                 print(f"Warning: No voice configuration for '{speaker}'. Skipping.")
                 return False
-
-            voice = voice_data.get("voice", "Ryan")
+            
+            voice = voice_data.get("voice", "Ryan")  # fallback sur Ryan si pas défini
             default_style = voice_data.get("default_style", "")
-            seed = int(voice_data.get("seed", -1))
-
+            seed = int(voice_data.get("seed", -1))   # conservé mais non utilisé ici
+            
             instruct = instruct_text if instruct_text else (default_style if default_style else "neutral")
-
+            
             print(f"TTS [external] generating with instruct='{instruct}' for text='{text[:50]}...'")
-
+            
             client = self._init_external()
-
+            
             result = client.predict(
-                text=text,
-                language=self._language,
-                speaker=voice,
-                instruct=instruct,
-                model_size="1.7B",
-                seed=seed,
-                api_name="/generate_custom_voice"
+                text,                   # 0: text
+                "Auto",                 # 1: lang_disp (Auto = détection automatique)
+                voice,                  # 2: spk_disp (ex: Aiden, Vivian, etc.)
+                instruct,               # 3: instruct
+                fn_index=0              # le bouton Generate principal
             )
-
+            
             generated_audio_filepath = result[0]
             if not generated_audio_filepath or not os.path.exists(generated_audio_filepath):
                 print(f"Error: No audio file generated for: '{text[:50]}...'")
                 return False
-
+            
             if os.path.getsize(generated_audio_filepath) == 0:
                 print(f"Error: Generated audio file is empty for: '{text[:50]}...'")
                 return False
-
+            
             shutil.copy(generated_audio_filepath, output_path)
             return True
-
+        
         except Exception as e:
-            import traceback
             print(f"Error generating custom voice for '{speaker}': {e}")
+            import traceback
             traceback.print_exc()
             return False
 
@@ -1515,16 +1659,11 @@ class TTSEngine:
             client = self._init_external()
 
             result = client.predict(
-                handle_file(ref_audio),
-                ref_text,
-                text,
-                "Auto",
-                False,       # use_xvector_only
-                "1.7B",
-                200,         # max_chunk_chars
-                0,           # chunk_gap
-                seed,
-                api_name="/generate_voice_clone"
+                handle_file(ref_audio),   # ref wav (gradio_client le gère)
+                ref_text,                 # transcription ref
+                text,                     # text à synthétiser
+                "Auto",                   # langue (ajuste si besoin)
+                fn_index=1                # ← ESSAIE 1 D'ABORD (onglet Voice Clone souvent = 1)
             )
 
             generated_audio_filepath = result[0]

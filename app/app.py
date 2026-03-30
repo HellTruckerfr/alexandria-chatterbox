@@ -507,13 +507,59 @@ async def get_voices():
         with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
             voice_config = json.load(f)
 
+    def _detect_gender_with_claude(name, script_data):
+        try:
+            api_key = ""
+            base_url = ""
+            if os.path.exists(CONFIG_PATH):
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    _c = json.load(f)
+                    api_key = _c.get("llm", {}).get("api_key", "")
+                    base_url = _c.get("llm", {}).get("base_url", "")
+            if not api_key or "anthropic" not in (base_url or ""):
+                return "male"
+            lines = [e.get("text","") for e in script_data if e.get("speaker","") == name][:3]
+            import urllib.request as _ur
+            payload = json.dumps({"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
+                "messages": [{"role": "user", "content": f"Character name: {name}. Dialogue: {' | '.join(lines)}. Male or female? Reply ONLY 'male' or 'female'."}]
+            }).encode()
+            req2 = _ur.Request("https://api.anthropic.com/v1/messages", data=payload,
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+            with _ur.urlopen(req2, timeout=5) as resp:
+                return "female" if "female" in json.loads(resp.read())["content"][0]["text"].lower() else "male"
+        except Exception as _e:
+            logger.warning(f"Gender detection failed for {name}: {_e}")
+            return "male"
+
+    def _default_voice_config(name, script_data=None):
+        is_f = _detect_gender_with_claude(name, script_data or []) == "female"
+        adapter = "feminine_fr_1774743389" if is_f else "narrator_fr_v2_1774774816"
+        return {"type": "lora", "voice": "feminine_fr" if is_f else "narrator_fr_v2",
+            "adapter_id": adapter, "adapter_path": f"lora_models/{adapter}",
+            "character_style": "", "default_style": "", "seed": "-1",
+            "ref_audio": None, "ref_text": None, "description": ""}
+
+    script_data_for_gender = []
+    if os.path.exists(SCRIPT_PATH):
+        try:
+            with open(SCRIPT_PATH, "r", encoding="utf-8") as f:
+                script_data_for_gender = json.load(f)
+        except Exception:
+            pass
+
     result = []
+    updated = False
     for voice_name in voices_list:
-        config = voice_config.get(voice_name, {})
-        result.append({
-            "name": voice_name,
-            "config": config
-        })
+        if voice_name in voice_config:
+            config = voice_config[voice_name]
+        else:
+            config = _default_voice_config(voice_name, script_data_for_gender)
+            voice_config[voice_name] = config
+            updated = True
+        result.append({"name": voice_name, "config": config})
+    if updated and os.path.exists(VOICE_CONFIG_PATH):
+        with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(voice_config, f, indent=2, ensure_ascii=False)
     return result
 
 @app.post("/api/parse_voices")
@@ -763,6 +809,7 @@ async def generate_batch_endpoint(request: BatchGenerateRequest, background_task
             f"Starting parallel generation of {total} chunks with {workers} workers..."
         ]
         try:
+            project_manager.get_engine()  # Assure que l'engine est initialisé avant le batch
             results = project_manager.generate_chunks_parallel(
                 indices, workers, progress_callback, cancel_check=cancel_check
             )
@@ -1958,6 +2005,261 @@ async def dataset_builder_delete(name: str):
     shutil.rmtree(work_dir, ignore_errors=True)
     logger.info(f"Dataset builder project discarded: {name}")
     return {"status": "deleted", "name": name}
+
+@app.get("/api/browse_folder")
+async def browse_folder():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', 1)
+        folder = filedialog.askdirectory(title="Selectionner un dossier")
+        root.destroy()
+        if folder:
+            folder = os.path.normpath(folder)
+            return {"path": folder}
+        return {"path": ""}
+    except Exception as e:
+        return {"path": "", "error": str(e)}
+
+@app.get("/api/batch_pipeline/dirs")
+async def batch_pipeline_get_dirs():
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            b = cfg.get("batch", {})
+            return {"input_dir": b.get("last_input_dir",""), "output_dir": b.get("last_output_dir",""), "export_format": b.get("last_export_format","mp3")}
+    except Exception:
+        pass
+    return {"input_dir": "", "output_dir": "", "export_format": "mp3"}
+
+@app.post("/api/batch_pipeline/save_dirs")
+async def batch_pipeline_save_dirs(data: dict):
+    try:
+        cfg = {}
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        cfg.setdefault("batch", {})
+        if data.get("input_dir"): cfg["batch"]["last_input_dir"] = data["input_dir"]
+        if data.get("output_dir"): cfg["batch"]["last_output_dir"] = data["output_dir"]
+        if data.get("export_format"): cfg["batch"]["last_export_format"] = data["export_format"]
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        return {"status": "saved"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+class BatchPipelineRequest(BaseModel):
+    input_dir: str
+    output_dir: str
+    export_format: str = "mp3"
+    chapter_start: int = 1
+    chapter_end: int = 9999
+
+batch_pipeline_state = {
+    "running": False, "paused": False, "cancel": False,
+    "total": 0, "current": 0, "chapters": [],
+    "start_time": None, "current_chapter": "",
+}
+
+@app.get("/api/batch_pipeline/status")
+async def batch_pipeline_status():
+    import time
+    state = dict(batch_pipeline_state)
+    if state["running"] and state["current"] > 0 and state["start_time"]:
+        elapsed = time.time() - state["start_time"]
+        avg = elapsed / state["current"]
+        state["eta_seconds"] = int(avg * (state["total"] - state["current"]))
+    else:
+        state["eta_seconds"] = None
+    return state
+
+@app.post("/api/batch_pipeline/start")
+async def batch_pipeline_start(request: BatchPipelineRequest, background_tasks: BackgroundTasks):
+    import glob, time
+    if batch_pipeline_state["running"]:
+        raise HTTPException(status_code=400, detail="Batch pipeline already running")
+    pattern = os.path.join(request.input_dir, "Chapitre_*.txt")
+    files = sorted(glob.glob(pattern))
+    def get_num(f):
+        try: return int(os.path.basename(f).replace("Chapitre_","").replace(".txt",""))
+        except: return 0
+    files = [f for f in files if request.chapter_start <= get_num(f) <= request.chapter_end]
+    if not files:
+        raise HTTPException(status_code=404, detail=f"Aucun fichier trouve dans {request.input_dir}")
+    chapters = []
+    for f in files:
+        name = os.path.splitext(os.path.basename(f))[0]
+        ext = ".mp3" if request.export_format == "mp3" else "_audacity.zip"
+        out = os.path.join(request.output_dir, f"{name}{ext}")
+        status = "done" if os.path.exists(out) else "pending"
+        chapters.append({"name": name, "path": f, "status": status, "error": "",
+            "tts_progress": 100 if status == "done" else 0,
+            "steps": {k: "done" if status == "done" else "pending" for k in ["llm","verif","tts","export"]}})
+    batch_pipeline_state.update({"running": False, "paused": False, "cancel": False,
+        "total": len(chapters), "current": sum(1 for c in chapters if c["status"] == "done"),
+        "chapters": chapters, "start_time": None, "current_chapter": ""})
+
+    def task():
+        import time, requests as req, glob as gl, tempfile, subprocess
+        batch_pipeline_state["running"] = True
+        batch_pipeline_state["start_time"] = time.time()
+        os.makedirs(request.output_dir, exist_ok=True)
+        ALEX = "http://127.0.0.1:4200"
+        vl_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "voicelines")
+        ffmpeg_bin = "C:/ffmpeg/bin/ffmpeg.exe" if os.path.exists("C:/ffmpeg/bin/ffmpeg.exe") else "ffmpeg"
+
+        for ch in batch_pipeline_state["chapters"]:
+            if batch_pipeline_state["cancel"]: break
+            while batch_pipeline_state["paused"]:
+                time.sleep(1)
+                if batch_pipeline_state["cancel"]: break
+            if ch["status"] == "done": continue
+            ch["status"] = "running"
+            batch_pipeline_state["current_chapter"] = ch["name"]
+            def ss(step, st, _ch=ch): _ch["steps"][step] = st
+
+            try:
+                with open(ch["path"], "rb") as f:
+                    r = req.post(f"{ALEX}/api/upload", files={"file": (os.path.basename(ch["path"]), f, "text/plain")})
+                if r.status_code != 200: raise Exception(f"Upload: {r.text}")
+
+                ss("llm","running")
+                r = req.post(f"{ALEX}/api/generate_script")
+                if r.status_code != 200: raise Exception(f"Script: {r.text}")
+                for _ in range(120):
+                    time.sleep(3)
+                    if not req.get(f"{ALEX}/api/status/script").json().get("running",True): break
+                ss("llm","done")
+
+                ss("verif","running")
+                r = req.post(f"{ALEX}/api/review_script")
+                if r.status_code == 200:
+                    for _ in range(60):
+                        time.sleep(2)
+                        if not req.get(f"{ALEX}/api/status/review").json().get("running",True): break
+                ss("verif","done")
+
+                ss("tts","running"); ch["tts_progress"] = 0
+                cleaned = 0
+                for w in gl.glob(os.path.join(vl_dir,"*.wav")):
+                    try: os.remove(w); cleaned += 1
+                    except: pass
+                logger.info(f"voicelines/ nettoyé: {cleaned} fichiers supprimés")
+
+                chunks_r = req.get(f"{ALEX}/api/chunks")
+                if chunks_r.status_code != 200: raise Exception("Get chunks failed")
+                total_chunks = len(chunks_r.json())
+                for _ in range(30):
+                    if not req.get(f"{ALEX}/api/status/audio").json().get("running",False): break
+                    time.sleep(2)
+                r = req.post(f"{ALEX}/api/generate_batch", json={"indices": list(range(total_chunks))})
+                if r.status_code != 200: raise Exception(f"Batch: {r.text}")
+                for _ in range(300):
+                    time.sleep(3)
+                    s = req.get(f"{ALEX}/api/status/audio").json()
+                    for log in reversed(s.get("logs",[])):
+                        if "Progress:" in log:
+                            try: ch["tts_progress"] = int(int(log.split("Progress:")[1].strip().split("/")[0].strip()) / total_chunks * 100)
+                            except: pass
+                            break
+                    if not s.get("running",True): break
+                ch["tts_progress"] = 100
+
+                def get_missing(_req=req):
+                    cd = _req.get(f"{ALEX}/api/chunks").json()
+                    miss = []
+                    for i, c in enumerate(cd):
+                        ap = c.get("audio_path")
+                        if not ap: miss.append(i); continue
+                        fp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ap)
+                        if not os.path.exists(fp) or os.path.getsize(fp) < 1024: miss.append(i)
+                    return miss
+                for retry in range(5):
+                    missing = get_missing()
+                    if not missing: break
+                    logger.warning(f"Retry {retry+1}/5 — {len(missing)} chunks sans WAV")
+                    for _ in range(30):
+                        if not req.get(f"{ALEX}/api/status/audio").json().get("running",False): break
+                        time.sleep(2)
+                    req.post(f"{ALEX}/api/generate_batch", json={"indices": missing})
+                    for _ in range(180):
+                        time.sleep(3)
+                        if not req.get(f"{ALEX}/api/status/audio").json().get("running",True): break
+
+                ss("tts","done"); ss("export","running")
+                wav_files = sorted(gl.glob(os.path.join(vl_dir,"*.wav")))
+                if not wav_files: raise Exception("Aucun WAV trouve dans voicelines/")
+                # Vérifie qu'on a bien tous les WAVs
+                if len(wav_files) < total_chunks:
+                    logger.warning(f"WAVs manquants: {len(wav_files)}/{total_chunks} — merge partiel")
+
+                if request.export_format == "mp3":
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
+                        for wf in wav_files:
+                            tf.write(f"file '{wf.replace(chr(92), '/')}'\n")
+                        filelist = tf.name
+                    out_path = os.path.join(request.output_dir, f"{ch['name']}.mp3")
+                    # Ajoute 1 seconde de silence à la fin
+                    silence_path = os.path.join(tempfile.gettempdir(), "silence_1s.wav")
+                    subprocess.run([ffmpeg_bin,"-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono",
+                        "-t","1",silence_path], capture_output=True)
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf2:
+                        for wf in wav_files:
+                            tf2.write("file '" + wf.replace(chr(92), '/') + "'\n")
+                        tf2.write("file '" + silence_path.replace(chr(92), '/') + "'\n")
+                        filelist2 = tf2.name
+                    res = subprocess.run([ffmpeg_bin,"-y","-f","concat","-safe","0","-i",filelist2,
+                        "-c:a","libmp3lame","-q:a","2",out_path], capture_output=True, text=True)
+                    os.unlink(filelist); os.unlink(filelist2)
+                    if res.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) < 10000:
+                        raise Exception(f"ffmpeg failed: {res.stderr[-300:]}")
+                else:
+                    r = req.post(f"{ALEX}/api/export_audacity")
+                    if r.status_code != 200: raise Exception(f"Audacity: {r.text}")
+                    for _ in range(60):
+                        time.sleep(2)
+                        if not req.get(f"{ALEX}/api/status/audacity_export").json().get("running",True): break
+                    r = req.get(f"{ALEX}/api/export_audacity")
+                    if r.status_code != 200: raise Exception("Download audacity failed")
+                    with open(os.path.join(request.output_dir, f"{ch['name']}_audacity.zip"), "wb") as f2:
+                        f2.write(r.content)
+
+                ss("export","done")
+                for wf in gl.glob(os.path.join(vl_dir,"*.wav")):
+                    try: os.remove(wf)
+                    except: pass
+                logger.info("voicelines/ nettoyé apres merge")
+                ch["status"] = "done"
+                batch_pipeline_state["current"] += 1
+            except Exception as e:
+                ch["status"] = "failed"; ch["error"] = str(e)
+                logger.error(f"Batch error on {ch['name']}: {e}")
+        batch_pipeline_state["running"] = False
+        batch_pipeline_state["current_chapter"] = ""
+
+    background_tasks.add_task(task)
+    return {"status": "started", "total": len(chapters)}
+
+@app.post("/api/batch_pipeline/pause")
+async def batch_pipeline_pause():
+    batch_pipeline_state["paused"] = not batch_pipeline_state["paused"]
+    return {"paused": batch_pipeline_state["paused"]}
+
+@app.post("/api/batch_pipeline/cancel")
+async def batch_pipeline_cancel():
+    batch_pipeline_state["cancel"] = True
+    return {"status": "cancelling"}
+
+@app.post("/api/batch_pipeline/recheck")
+async def batch_pipeline_recheck():
+    failed = [c for c in batch_pipeline_state["chapters"] if c["status"] == "failed"]
+    for c in failed:
+        c["status"] = "pending"; c["error"] = ""
+    return {"reset": len(failed)}
 
 if __name__ == "__main__":
     import uvicorn

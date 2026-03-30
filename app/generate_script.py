@@ -260,14 +260,16 @@ def process_chunk(client, model_name, chunk, chunk_num, total_chunks, previous_e
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
+            # Anthropic n'accepte pas temperature ET top_p en meme temps
+            _base_url = getattr(client, 'base_url', '') or ''
+            _is_anthropic = 'anthropic.com' in str(_base_url)
+            _params = dict(
                 model=model_name,
                 messages=[
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=temperature,
-                top_p=top_p,
                 presence_penalty=presence_penalty,
                 max_tokens=max_tokens,
                 extra_body={
@@ -278,6 +280,9 @@ def process_chunk(client, model_name, chunk, chunk_num, total_chunks, previous_e
                     }.items() if v is not None
                 }
             )
+            if not _is_anthropic:
+                _params["top_p"] = top_p
+            response = client.chat.completions.create(**_params)
 
             choice = response.choices[0]
             text = choice.message.content.strip()
