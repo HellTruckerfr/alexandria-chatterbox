@@ -69,3 +69,9 @@ builtin_lora/builtin_*/
 # Dataset builder working directory
 dataset_builder/
 
+
+app/my_vampire_system_audiobook/
+
+cloned_audiobook.wav
+
+cloned_audiobook.mp3
