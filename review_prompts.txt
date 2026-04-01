@@ -6,74 +6,75 @@ OUTPUT FORMAT: A JSON array of corrected entries, same format as input. Include 
 
 CRITICAL RULES — NEVER VIOLATE THESE:
 - Every entry in your output MUST have all three fields: "speaker", "text", and "instruct". Never omit a field.
-- NEVER drop text. When you split or restructure an entry, every sentence from the original MUST appear in exactly one output entry. The combined text of all output entries must account for ALL text from all input entries. Dropping even a single sentence is a critical failure.
-- NEVER change the author's wording, tense, person, or phrasing. If the source text says "I did so", keep "I did so" — do NOT rewrite it as "Watson did so" or any other form.
+- NEVER drop text. When you split or restructure an entry, every sentence from the original MUST appear in exactly one output entry.
+- NEVER change the author's wording, tense, person, or phrasing.
 - NEVER change punctuation — dashes (--), ellipses (...), quotes, or any other punctuation must stay exactly as they appear.
-- NEVER split a CHARACTER entry into multiple entries of the SAME speaker. If Holmes says three sentences in a row with no narration or attribution tag between them, that is ONE entry — not three. Only split when there is an attribution tag (like "said he") or narration embedded between separate quoted sentences that needs to be extracted. Splitting at sentence boundaries within a single continuous speech is WRONG.
+- NEVER split a CHARACTER entry into multiple entries of the SAME speaker unless there is an attribution tag or narration between them.
 
 FIXES TO APPLY:
 
 1. STRIP ATTRIBUTION TAGS FROM DIALOGUE
-   Character dialogue should contain ONLY the spoken words. Remove attribution phrases like "said he", "she replied", "I remarked", "he continued", "asked Holmes", etc. — but keep ALL surrounding dialogue intact. Only the attribution tag itself is removed; every sentence of dialogue must remain.
-   WRONG: {"speaker": "HOLMES", "text": "It is simplicity itself, said he; my eyes tell me that the leather is scored by six cuts.", "instruct": "Quietly triumphant."}
-   RIGHT: {"speaker": "HOLMES", "text": "It is simplicity itself; my eyes tell me that the leather is scored by six cuts.", "instruct": "Quietly triumphant."}
-   When the attribution contains a physical action (participial phrase like "lighting a cigarette", "glancing out the window"), extract it as a NEW NARRATOR entry inserted directly after the dialogue. The new NARRATOR entry MUST have "instruct": "Neutral, even narration.":
-   WRONG: {"speaker": "HOLMES", "text": "Quite so, he answered, lighting a cigarette, and throwing himself down into an armchair. You see, but you do not observe.", "instruct": "Quietly analytical."}
-   RIGHT:
-     {"speaker": "HOLMES", "text": "Quite so.", "instruct": "Quietly analytical."}
-     {"speaker": "NARRATOR", "text": "Holmes lit a cigarette and threw himself down into an armchair.", "instruct": "Neutral, even narration."}
-     {"speaker": "HOLMES", "text": "You see, but you do not observe.", "instruct": "Quietly analytical."}
-   Note: When extracting actions to NARRATOR, use the character's name (not a pronoun) and convert participial phrases to past tense. This is the ONLY case where you may rephrase text.
+   Remove attribution phrases like "said he", "she replied", "he continued", "asked Holmes", etc.
+   When the attribution contains a physical action, extract it as a NEW NARRATOR entry after the dialogue with "instruct": "Neutral, even narration."
 
 2. SPLIT NARRATION OUT OF CHARACTER ENTRIES
-   A CHARACTER entry must contain ONLY words spoken aloud. If it contains narration that is clearly NOT dialogue (third-person descriptions of actions, scene-setting mixed in before or after the quoted speech), split them out as NARRATOR entries.
-   WRONG: {"speaker": "WATSON", "text": "I could not help laughing at the ease with which he explained his process of deduction. When I hear you give your reasons, the thing always appears to me to be so ridiculously simple.", "instruct": "Amused, reflective."}
-   RIGHT:
-     {"speaker": "NARRATOR", "text": "I could not help laughing at the ease with which he explained his process of deduction.", "instruct": "Neutral, even narration."}
-     {"speaker": "WATSON", "text": "When I hear you give your reasons, the thing always appears to me to be so ridiculously simple.", "instruct": "Amused, reflective."}
-   IMPORTANT: Copy the narration text EXACTLY as it appears — do NOT convert first person to third person. "I could not help laughing" stays as "I could not help laughing", NOT "Watson could not help laughing".
-   The key test: narration describes what happened (past tense reporting), dialogue is spoken to another character (present tense address). In the example above, "I could not help laughing at the ease..." is the narrator reporting what happened, while "When I hear you give your reasons..." is Watson speaking directly to Holmes.
+   A CHARACTER entry must contain ONLY words spoken aloud. Split out narration as NARRATOR entries.
+   Copy narration text EXACTLY — do NOT convert first person to third person.
 
 3. SPLIT DIALOGUE OUT OF NARRATOR ENTRIES
-   A NARRATOR entry must NOT contain quoted dialogue. If it does, extract the dialogue as a CHARACTER entry. ALL parts of the original text must be preserved — both the narration AND the dialogue must appear in the output, plus any trailing narration as a separate NARRATOR entry.
-   WRONG: {"speaker": "NARRATOR", "text": "He examined the paper carefully. \"The name of the maker, no doubt; or his monogram, rather.\" His eyes narrowed as he spoke.", "instruct": "Neutral, even narration."}
-   RIGHT:
-     {"speaker": "NARRATOR", "text": "He examined the paper carefully.", "instruct": "Neutral, even narration."}
-     {"speaker": "WATSON", "text": "The name of the maker, no doubt; or his monogram, rather.", "instruct": "Speculative, cautious."}
-     {"speaker": "NARRATOR", "text": "His eyes narrowed as he spoke.", "instruct": "Neutral, even narration."}
-   Use surrounding context (previous/next entries) to determine the correct speaker for extracted dialogue. Never drop trailing narration — if text follows the dialogue, it becomes its own NARRATOR entry.
+   A NARRATOR entry must NOT contain quoted dialogue. Extract it as a CHARACTER entry.
+   ALL parts must be preserved — narration AND dialogue AND any trailing narration.
 
 4. MERGE OVER-SPLIT NARRATOR ENTRIES
-   Consecutive NARRATOR entries that are short (under ~150 characters each) and cover the same continuous scene should be merged into a single entry. Short, choppy narrator lines cause inconsistent TTS delivery.
-   WRONG:
-     {"speaker": "NARRATOR", "text": "A slow and heavy step was heard upon the stairs.", "instruct": "Neutral, even narration."}
-     {"speaker": "NARRATOR", "text": "Then there was a loud and authoritative tap.", "instruct": "Neutral, even narration."}
-   RIGHT:
-     {"speaker": "NARRATOR", "text": "A slow and heavy step was heard upon the stairs. Then there was a loud and authoritative tap.", "instruct": "Neutral, even narration."}
-   Do NOT merge narrators if: (a) both entries are already long (over ~200 characters each), (b) a genuine tone shift occurs between them, or (c) either entry is NOT a full narrative sentence. Short fragments like book titles, author names, dedications, chapter numbers, chapter titles, section headings, or other front-matter/structural text must always remain as separate entries — they are distinct items, not choppy narration.
-   WRONG (merging structural text):
-     {"speaker": "NARRATOR", "text": "THE GREAT GATSBY BY F. SCOTT FITZGERALD To my wife. CHAPTER ONE", "instruct": "Neutral, even narration."}
-   RIGHT (kept separate):
-     {"speaker": "NARRATOR", "text": "THE GREAT GATSBY", "instruct": "Neutral, even narration."}
-     {"speaker": "NARRATOR", "text": "BY F. SCOTT FITZGERALD", "instruct": "Neutral, even narration."}
-     {"speaker": "NARRATOR", "text": "To my wife.", "instruct": "Neutral, even narration."}
-     {"speaker": "NARRATOR", "text": "CHAPTER ONE", "instruct": "Neutral, even narration."}
-   EXCEPTION: A bare chapter number and its chapter title, when split across two entries, SHOULD be merged into one entry so TTS reads them together naturally.
-   WRONG (split number and title):
-     {"speaker": "NARRATOR", "text": "1", "instruct": "Neutral, even narration."}
-     {"speaker": "NARRATOR", "text": "SPADE & ARCHER", "instruct": "Neutral, even narration."}
-   RIGHT (combined):
-     {"speaker": "NARRATOR", "text": "1 SPADE & ARCHER", "instruct": "Neutral, even narration."}
+   Consecutive NARRATOR entries under ~150 characters covering the same scene should be merged.
+   Do NOT merge structural text (chapter titles, headings, dedications).
+   A bare chapter number and its title SHOULD be merged so TTS reads them together naturally.
 
-5. VALIDATE INSTRUCT FIELDS
-   - NARRATOR: Must be "Neutral, even narration." or a single tonal variant matching the scene ("Tense, clipped narration.", "Quiet, somber narration.", "Wry, light narration."). Fix any narrator instruct that describes character emotions, physical actions, or reads like a character direction.
-     WRONG: "With a sense of foreboding and dread." → RIGHT: "Dark, heavy narration."
-     WRONG: "Neutral, even narration." during a tense chase scene → acceptable to leave as-is OR upgrade to "Tense, urgent narration." — but never downgrade a valid tonal variant back to neutral.
-   - CHARACTER: Instructs should describe the VOICE using emotion, delivery, and vocal quality (~8-15 words). Replace physical descriptions with vocal equivalents:
-     WRONG: "Trembling with shock." → RIGHT: "Shocked, voice cracking with disbelief."
-     WRONG: "Leaning forward eagerly." → RIGHT: "Eager, bright energy, words tumbling out."
-     WRONG: "He tries to sound casual." → RIGHT: "Forced casual tone, not quite selling it."
-   - Do NOT shorten or simplify instructs that are already valid voice descriptions. A rich instruct like "Cold fury, barely contained, voice tight" is correct and should not be reduced.
+5. VALIDATE AND REWRITE INSTRUCT FIELDS — THIS IS THE MOST CRITICAL FIX
+
+   NARRATOR: Must match exactly one of these 8 options:
+     1. "Neutral, even narration."
+     2. "Tense, quiet narration, sense of dread."
+     3. "Fast-paced, urgent narration."
+     4. "Grave, solemn narration."
+     5. "Hushed, reverent narration, weight of the moment."
+     6. "Wry, dry narration, slight ironic distance."
+     7. "Breathless, stunned narration."
+     8. "Slow, heavy narration, exhaustion in every word."
+   Fix ANY narrator instruct that does not match exactly one of these 8 options.
+
+   CHARACTER: THE GOLDEN RULE — describe what the VOICE is PHYSICALLY DOING, not the emotion abstractly.
+   Target 15-25 words. Use prosodic and physical markers.
+
+   PROSODIC MARKERS to use:
+   - Pace: "rushing the words", "dragging each syllable", "clipped and staccato", "long pauses"
+   - Breath: "breathless", "catching breath mid-sentence", "exhaling defeat", "voice tight"
+   - Pitch: "voice dropping low", "pitch rising to a near-shout", "voice going flat and dead"
+   - Texture: "voice cracking", "ragged edge", "smooth and cold as ice", "trembling at the edges"
+   - Volume: "barely above a whisper", "building to a roar", "hissing through teeth"
+
+   MANDATORY REWRITE — rewrite instruct if it:
+   - Is under 8 words
+   - Describes physical action instead of voice ("leaning forward", "hands shaking")
+   - Uses only abstract emotion words without physical voice description ("angry", "sad", "happy")
+   - Is vague or generic
+
+   REWRITE EXAMPLES — these transformations are REQUIRED:
+   "Trembling with shock." -> "Voice going completely flat, words barely forming, mind clearly somewhere else entirely."
+   "Angry." -> "Exploding with fury, voice cracking on the high notes, words firing like bullets, no breath between them."
+   "Sad, crying." -> "Crying through the words, voice collapsing mid-sentence, trying and failing to hold it together."
+   "Excited." -> "Giddy, words tumbling over each other, pitch rising, smile bleeding into every syllable."
+   "Leaning forward eagerly." -> "Eager and urgent, rushing the words, voice bright and pressing forward relentlessly."
+   "Cold and calm." -> "Voice dropped to near-silence, each word placed with surgical precision, no warmth at all."
+   "Scared." -> "Voice collapsing to a whisper, breath stuttering, words barely making it out before the next gasp."
+   "Happy." -> "Laughing through the words, pitch soaring, completely unable to contain it, voice bright and spilling over."
+   "Commanding." -> "Iron in every syllable, voice filling the room, no hesitation, no room for argument whatsoever."
+   "Sarcastic." -> "Dripping with contempt, drawling each word, voice curling around the insult like smoke."
+   "Desperate." -> "Voice breaking apart mid-sentence, rushing the words like running out of time, on the edge of tears."
+   "Quiet threat." -> "Voice dropping to near-silence, each word placed with surgical precision, no emotion, just pure intent."
+
+   Do NOT shorten or simplify instructs that are already valid physical voice descriptions.
+   A rich instruct like "Cold fury, barely contained, voice tight and clipped" is correct — keep it.
 ---SEPARATOR---
 {context}
 

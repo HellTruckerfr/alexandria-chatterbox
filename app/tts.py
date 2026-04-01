@@ -591,6 +591,19 @@ class TTSEngine:
                 "character_style": "", "default_style": "", "seed": "-1",
                 "ref_audio": None, "ref_text": None, "description": ""}
             voice_config[speaker] = voice_data
+            # Sauvegarde dans voice_config.json pour éviter re-détection au prochain démarrage
+            try:
+                import json as _json2
+                vc_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "voice_config.json"))
+                if os.path.exists(vc_path):
+                    with open(vc_path, "r", encoding="utf-8") as _f2:
+                        _vc = _json2.load(_f2)
+                    _vc[speaker] = voice_data
+                    with open(vc_path, "w", encoding="utf-8") as _f2:
+                        _json2.dump(_vc, _f2, indent=2, ensure_ascii=False)
+                    print(f"voice_config.json mis a jour: {speaker} -> {'feminine_fr' if is_f else 'narrator_fr_v2'}")
+            except Exception as _e2:
+                print(f"Sauvegarde voice_config echouee pour {speaker}: {_e2}")
 
         voice_type = voice_data.get("type", "custom")
 
@@ -931,7 +944,40 @@ class TTSEngine:
                         with open(local_wav, 'wb') as wf:
                             wf.write(wav_bytes)
                         if os.path.getsize(local_wav) > 100:  # seuil bas — meme les courtes repliques sont valides
-                            shutil.copy2(local_wav, out)
+                            # Post-processing volume selon instruct
+                            instruct_lower = chunk.get("instruct", "").lower()
+                            gain = None
+                            if any(w in instruct_lower for w in [
+                                "screaming", "shouting", "roar", "exploding",
+                                "building to a roar", "pitch rising to a near-shout",
+                                "words firing like bullets", "fury", "yelling"
+                            ]):
+                                gain = "2.0"  # +6dB
+                            elif any(w in instruct_lower for w in [
+                                "whisper", "barely above a whisper", "murmur",
+                                "voice dropping to near-silence", "barely audible",
+                                "near-silence", "barely making it out"
+                            ]):
+                                gain = "0.4"  # -8dB
+
+                            if gain:
+                                try:
+                                    import subprocess as _sp, tempfile as _tmp2
+                                    gained_wav = _tmp2.NamedTemporaryFile(suffix=".wav", delete=False).name
+                                    ffmpeg_bin = "C:/ffmpeg/bin/ffmpeg.exe" if os.path.exists("C:/ffmpeg/bin/ffmpeg.exe") else "ffmpeg"
+                                    _sp.run([ffmpeg_bin, "-y", "-i", local_wav,
+                                        "-filter:a", f"volume={gain}",
+                                        gained_wav], capture_output=True)
+                                    if os.path.exists(gained_wav) and os.path.getsize(gained_wav) > 1024:
+                                        shutil.copy2(gained_wav, out)
+                                    else:
+                                        shutil.copy2(local_wav, out)
+                                    os.unlink(gained_wav)
+                                except Exception as _ve:
+                                    print(f"Volume gain failed: {_ve}")
+                                    shutil.copy2(local_wav, out)
+                            else:
+                                shutil.copy2(local_wav, out)
                             results["completed"].append(idx)
                         else:
                             results["failed"].append((idx, "WAV trop petit"))
